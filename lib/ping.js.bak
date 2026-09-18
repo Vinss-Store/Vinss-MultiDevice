@@ -1,0 +1,749 @@
+/*═══════════════════════════════════════════════════════
+ * PING LIVE + SPEEDTEST — Yushino-Md Monitor
+ * Tema: BLACK PREMIUM EDITION
+ *═══════════════════════════════════════════════════════
+ * File    : lib/ping.js
+ * Import  : import { buildPingMessage, collectServerData, checkPingRate } from "./lib/ping.js";
+ * Command : .ping / .pinglive / .server
+ *═══════════════════════════════════════════════════════
+ */
+
+import os from 'os'
+import fs from 'fs'
+import { execSync } from 'child_process'
+
+const BANNER = 'https://j.top4top.io/p_3894432qz0.jpg'
+
+// ===== CACHE SPEEDTEST (30 detik) =====
+let SPEED_CACHE = { at: 0, ping: 0, download: '-', upload: '-' }
+const SPEED_TTL = 30000
+
+// ===== FORMAT HELPERS =====
+function formatSize(bytes) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0, v = bytes
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(i === 0 ? 0 : 2)} ${u[i]}`
+}
+
+function formatSpeed(bps) {
+  if (bps >= 1024 * 1024) return (bps / 1024 / 1024).toFixed(2) + ' MB/s'
+  if (bps >= 1024) return (bps / 1024).toFixed(2) + ' KB/s'
+  return bps.toFixed(0) + ' B/s'
+}
+
+function safe(fn, fallback = null) {
+  try { return fn() } catch { return fallback }
+}
+
+// ===== SYSTEM INFO =====
+function getDisk() {
+  return safe(() => {
+    const out = execSync('df -kP /', { timeout: 3000 }).toString().trim().split('\n')
+    const r = out.slice(1).map(l => l.trim().split(/\s+/))[0]
+    const total = +r[1] * 1024, used = +r[2] * 1024
+    return { total, used, percent: +(used / total * 100).toFixed(1) }
+  })
+}
+
+function getSwap() {
+  return safe(() => {
+    const f = fs.readFileSync('/proc/meminfo', 'utf8')
+    const total = (f.match(/^SwapTotal:\s+(\d+)/) || [0, 0])[1] * 1024
+    const free  = (f.match(/^SwapFree:\s+(\d+)/)  || [0, 0])[1] * 1024
+    if (!total) return null
+    const used = total - free
+    return { total, used, percent: +(used / total * 100).toFixed(1) }
+  })
+}
+
+function getCpuTemp() {
+  return safe(() => {
+    const paths = [
+      '/sys/class/thermal/thermal_zone0/temp',
+      '/sys/class/thermal/thermal_zone1/temp',
+      '/sys/devices/virtual/thermal/thermal_zone0/temp'
+    ]
+    for (const p of paths) {
+      if (fs.existsSync(p)) {
+        const val = parseInt(fs.readFileSync(p, 'utf8').trim(), 10)
+        if (!isNaN(val)) {
+          const temp = val > 1000 ? val / 1000 : val
+          return { val: temp, text: temp.toFixed(1) + '°C' }
+        }
+      }
+    }
+    return { val: 0, text: 'N/A' }
+  }, { val: 0, text: 'N/A' })
+}
+
+function getNetworkIP() {
+  return safe(() => {
+    const ni = os.networkInterfaces()
+    for (const addrs of Object.values(ni)) {
+      for (const a of addrs || []) {
+        if (!a.internal && a.family === 'IPv4') return a.address
+      }
+    }
+    return '-'
+  }, '-')
+}
+
+// ===== NETWORK SPEEDTEST (CACHE) =====
+async function measureNetwork() {
+  const now = Date.now()
+  if (now - SPEED_CACHE.at < SPEED_TTL) return SPEED_CACHE
+
+  let ping = 0
+  let download = '-'
+  let upload = '-'
+
+  try {
+    const start = Date.now()
+    const res = await fetch('https://speed.cloudflare.com/__down?bytes=500000', {
+      signal: AbortSignal.timeout(5000)
+    })
+    ping = Date.now() - start
+    if (res.ok) {
+      const buf = await res.arrayBuffer()
+      const sec = (Date.now() - start) / 1000
+      download = formatSpeed(buf.byteLength / sec)
+    }
+  } catch { ping = 0; download = 'N/A' }
+
+  try {
+    const payload = 'x'.repeat(100000)
+    const start = Date.now()
+    await fetch('https://httpbin.org/post', {
+      method: 'POST',
+      body: payload,
+      signal: AbortSignal.timeout(5000)
+    })
+    const sec = (Date.now() - start) / 1000
+    upload = formatSpeed(100000 / sec)
+  } catch { upload = 'N/A' }
+
+  SPEED_CACHE = { at: now, ping, download, upload }
+  return SPEED_CACHE
+}
+
+// ===== COLLECT DATA =====
+export async function collectServerData(client) {
+  const cores = os.cpus().length
+  const load = os.loadavg()
+  const totalMem = os.totalmem()
+  const freeMem = os.freemem()
+  const usedMem = totalMem - freeMem
+  const heap = process.memoryUsage()
+  const isBun = typeof Bun !== 'undefined'
+  const disk = getDisk()
+  const tempObj = getCpuTemp()
+  const net = await measureNetwork()
+
+  return {
+    botName: client?.user?.name || 'Yushino-Md',
+    cpu: +Math.min(99.9, (load[0] / Math.max(cores, 1)) * 100).toFixed(1),
+    ram: +((usedMem / totalMem) * 100).toFixed(1),
+    disk: disk ? disk.percent : 0,
+    tempVal: tempObj.val,
+    tempTxt: tempObj.text,
+    cores,
+    osType: `${os.type()} ${os.release()}`,
+    arch: os.arch(),
+    heapUsed: formatSize(heap.heapUsed),
+    rss: formatSize(heap.rss),
+    memUsed: formatSize(usedMem),
+    memTotal: formatSize(totalMem),
+    diskTxt: disk ? `${formatSize(disk.used)} / ${formatSize(disk.total)}` : '-',
+    swapTxt: (s => s ? `${formatSize(s.used)} / ${formatSize(s.total)}` : 'None')(getSwap()),
+    net: getNetworkIP(),
+    runtime: isBun ? `Bun ${Bun.version}` : `Node ${process.version}`,
+    engine: isBun ? 'JavaScriptCore' : `V8 ${process.versions.v8}`,
+    botUpSec: Math.floor(process.uptime()),
+    sysUpSec: Math.floor(os.uptime()),
+    at: Date.now(),
+    ping: net.ping,
+    download: net.download,
+    upload: net.upload,
+  }
+}
+
+// ===== RATE LIMIT =====
+const RATE = new Map()
+export function checkPingRate(sender) {
+  const last = RATE.get(sender) || 0
+  if (Date.now() - last < 5000) {
+    return Math.ceil((5000 - (Date.now() - last)) / 1000)
+  }
+  RATE.set(sender, Date.now())
+  return 0
+}
+
+// ===== BUILD HTML — BLACK PREMIUM EDITION =====
+export function buildPingHtml(d) {
+  const DATA = JSON.stringify({
+    cpu: d.cpu, ram: d.ram, disk: d.disk, temp: d.tempVal,
+    botUpSec: d.botUpSec, sysUpSec: d.sysUpSec, at: d.at,
+  }).replace(/</g, '\\u003c')
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+</head>
+<body style="margin:0;padding:0;background:#000;">
+<style>
+*{box-sizing:border-box;margin:0;font-family:'Segoe UI',Arial,sans-serif;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{width:100%}
+
+/* ═══════════════════════════════════════
+   BACKGROUND — PURE BLACK + NEON ORB
+   ═══════════════════════════════════════ */
+body{
+  background:#000;
+  padding:10px;
+  color:#e8f0ff;
+  overflow-y:auto;
+  position:relative;
+  min-height:100vh;
+}
+
+/* Neon orb bergerak */
+body::before{
+  content:'';
+  position:fixed;
+  inset:0;
+  background:
+    radial-gradient(circle at 15% 15%,rgba(0,229,255,.14) 0%,transparent 45%),
+    radial-gradient(circle at 85% 25%,rgba(168,85,247,.14) 0%,transparent 45%),
+    radial-gradient(circle at 50% 95%,rgba(34,197,94,.08) 0%,transparent 45%),
+    radial-gradient(circle at 50% 50%,#0a0a0f 0%,#000 70%);
+  background-size:180% 180%;
+  animation:bgFlow 18s ease-in-out infinite;
+  z-index:-2;
+}
+@keyframes bgFlow{
+  0%,100%{background-position:0% 0%,100% 0%,50% 100%,0% 0%}
+  50%{background-position:100% 50%,0% 50%,50% 0%,100% 100%}
+}
+
+/* Grid lines halus */
+body::after{
+  content:'';
+  position:fixed;
+  inset:0;
+  background-image:
+    linear-gradient(rgba(0,229,255,.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,229,255,.03) 1px,transparent 1px);
+  background-size:28px 28px;
+  pointer-events:none;
+  z-index:-1;
+  mask-image:radial-gradient(circle at 50% 40%,#000 30%,transparent 80%);
+  -webkit-mask-image:radial-gradient(circle at 50% 40%,#000 30%,transparent 80%);
+}
+
+#app{max-width:440px;margin:0 auto;position:relative}
+
+/* ═══════════════════════════════════════
+   HEADER — OBSIDIAN BLACK
+   ═══════════════════════════════════════ */
+.hdr{
+  position:relative;
+  display:flex;gap:12px;align-items:center;
+  padding:12px;border-radius:18px;margin-bottom:10px;
+  overflow:hidden;
+  background:linear-gradient(135deg,#0a0a12 0%,#050508 100%);
+  border:1px solid rgba(0,229,255,.25);
+  box-shadow:
+    0 0 0 1px rgba(0,229,255,.06) inset,
+    0 0 25px rgba(0,229,255,.15),
+    0 8px 30px rgba(0,0,0,.9);
+  animation:hdrNeon 3.5s ease-in-out infinite;
+}
+@keyframes hdrNeon{
+  0%,100%{box-shadow:0 0 0 1px rgba(0,229,255,.06) inset,0 0 25px rgba(0,229,255,.15),0 8px 30px rgba(0,0,0,.9)}
+  50%{box-shadow:0 0 0 1px rgba(168,85,247,.1) inset,0 0 35px rgba(168,85,247,.25),0 8px 30px rgba(0,0,0,.9)}
+}
+.hdr::before{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(0,229,255,.15),transparent);
+  transform:translateX(-100%);
+  animation:shine 4s infinite;
+}
+@keyframes shine{100%{transform:translateX(100%)}}
+
+.hdr img{
+  width:54px;height:54px;border-radius:14px;object-fit:cover;
+  border:2px solid rgba(0,229,255,.5);
+  box-shadow:0 0 20px rgba(0,229,255,.6),0 0 40px rgba(0,229,255,.2);
+  animation:avatarPulse 3s ease-in-out infinite;
+  filter:saturate(1.2) contrast(1.05);
+}
+@keyframes avatarPulse{
+  0%,100%{box-shadow:0 0 20px rgba(0,229,255,.6),0 0 40px rgba(0,229,255,.2)}
+  50%{box-shadow:0 0 30px rgba(0,229,255,.9),0 0 60px rgba(168,85,247,.4)}
+}
+
+.hdr h1{
+  font:900 17px 'Arial Black';letter-spacing:.5px;
+  background:linear-gradient(90deg,#00e5ff,#a855f7,#00e5ff);
+  background-size:200% auto;
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+  animation:textShine 3s linear infinite;
+  text-shadow:0 0 20px rgba(0,229,255,.3);
+}
+@keyframes textShine{
+  0%{background-position:0% center}
+  100%{background-position:200% center}
+}
+
+.hdr .st{
+  display:flex;align-items:center;gap:6px;
+  font-size:10px;font-weight:800;color:#4ade80;
+  margin-top:3px;letter-spacing:1.5px;
+}
+.hdr .st i{
+  width:8px;height:8px;border-radius:50%;
+  background:#4ade80;
+  box-shadow:0 0 12px #4ade80,0 0 24px rgba(74,222,128,.5);
+  animation:dotPulse 1.4s infinite;
+}
+@keyframes dotPulse{
+  0%,100%{transform:scale(1);opacity:1}
+  50%{transform:scale(1.4);opacity:.5}
+}
+
+/* ═══════════════════════════════════════
+   NET GRID — 3 CARD NEON
+   ═══════════════════════════════════════ */
+.net-grid{
+  display:grid;grid-template-columns:1fr 1fr 1fr;
+  gap:7px;margin-bottom:10px;
+}
+.net-card{
+  border-radius:14px;padding:10px 8px;text-align:center;
+  overflow:hidden;position:relative;
+  background:linear-gradient(135deg,#08080f 0%,#020205 100%);
+  border:1px solid rgba(0,229,255,.2);
+  box-shadow:
+    0 0 12px rgba(0,229,255,.08) inset,
+    0 4px 15px rgba(0,0,0,.8);
+  transition:all .3s ease;
+  animation:cardFadeIn .6s ease backwards;
+}
+.net-card:nth-child(1){animation-delay:.05s;border-color:rgba(0,229,255,.3)}
+.net-card:nth-child(2){animation-delay:.1s;border-color:rgba(168,85,247,.3)}
+.net-card:nth-child(3){animation-delay:.15s;border-color:rgba(34,197,94,.3)}
+@keyframes cardFadeIn{
+  from{opacity:0;transform:translateY(12px) scale(.94)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.net-card::before{
+  content:'';position:absolute;top:0;left:-100%;
+  width:100%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.08),transparent);
+  animation:cardShine 5s ease-in-out infinite;
+}
+@keyframes cardShine{
+  0%{left:-100%}
+  50%,100%{left:100%}
+}
+.net-card small{
+  font:800 8px Arial;color:#64748b;
+  display:block;margin-bottom:4px;letter-spacing:1.5px;
+  position:relative;
+}
+.net-card:nth-child(1) small{color:#00e5ff}
+.net-card:nth-child(2) small{color:#a855f7}
+.net-card:nth-child(3) small{color:#4ade80}
+.net-card b{
+  font:800 12px 'Courier New',monospace;color:#f8fafc;
+  position:relative;
+  text-shadow:0 0 10px currentColor;
+}
+.net-card:nth-child(1) b{color:#00e5ff;text-shadow:0 0 12px rgba(0,229,255,.7)}
+.net-card:nth-child(2) b{color:#c084fc;text-shadow:0 0 12px rgba(168,85,247,.7)}
+.net-card:nth-child(3) b{color:#4ade80;text-shadow:0 0 12px rgba(74,222,128,.7)}
+
+/* ═══════════════════════════════════════
+   UPTIME — BLACK PANEL
+   ═══════════════════════════════════════ */
+.up{
+  border-radius:16px;padding:14px 12px;margin-bottom:10px;
+  text-align:center;position:relative;overflow:hidden;
+  background:linear-gradient(135deg,#0a1208 0%,#030503 100%);
+  border:1px solid rgba(34,197,94,.35);
+  animation:upGlow 4s ease-in-out infinite;
+}
+@keyframes upGlow{
+  0%,100%{box-shadow:0 0 20px rgba(34,197,94,.15),inset 0 0 25px rgba(34,197,94,.03)}
+  50%{box-shadow:0 0 40px rgba(34,197,94,.3),inset 0 0 35px rgba(34,197,94,.08)}
+}
+.up::before{
+  content:'';position:absolute;inset:0;
+  background:radial-gradient(circle at 50% 0%,rgba(34,197,94,.15),transparent 70%);
+}
+.up::after{
+  content:'';position:absolute;
+  top:0;left:-100%;
+  width:100%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(74,222,128,.1),transparent);
+  animation:upScan 6s linear infinite;
+}
+@keyframes upScan{100%{left:200%}}
+
+.up small{
+  position:relative;font:800 8px Arial;
+  letter-spacing:2.5px;color:#86efac;
+}
+.up b{
+  position:relative;display:block;
+  font:900 22px 'Arial Black';color:#4ade80;
+  text-shadow:0 0 20px rgba(74,222,128,.8),0 0 40px rgba(74,222,128,.4);
+  margin-top:4px;font-variant-numeric:tabular-nums;
+  animation:upText 3s ease-in-out infinite;
+  letter-spacing:1px;
+}
+@keyframes upText{
+  0%,100%{text-shadow:0 0 20px rgba(74,222,128,.8),0 0 40px rgba(74,222,128,.4)}
+  50%{text-shadow:0 0 30px rgba(74,222,128,1),0 0 60px rgba(74,222,128,.6)}
+}
+.up span{
+  position:relative;font:600 9px 'Courier New',monospace;
+  color:#94a3b8;display:block;margin-top:4px;letter-spacing:.5px;
+}
+
+/* ═══════════════════════════════════════
+   GAUGE — BLACK CARD + NEON BAR
+   ═══════════════════════════════════════ */
+.gauge{
+  border-radius:14px;padding:11px 12px;margin-bottom:8px;
+  background:linear-gradient(135deg,#08080f 0%,#020205 100%);
+  border:1px solid rgba(255,255,255,.08);
+  position:relative;overflow:hidden;
+  box-shadow:0 4px 15px rgba(0,0,0,.6);
+  animation:cardFadeIn .6s ease backwards;
+}
+.gauge:nth-child(1){animation-delay:.2s}
+.gauge:nth-child(2){animation-delay:.25s}
+.gauge:nth-child(3){animation-delay:.3s}
+.gauge:nth-child(4){animation-delay:.35s}
+
+.gl{
+  display:flex;justify-content:space-between;
+  font:800 11px 'Courier New',monospace;
+  margin-bottom:8px;align-items:center;
+}
+.gl b{
+  color:#94a3b8;letter-spacing:1px;
+  display:flex;align-items:center;gap:6px;
+  font-size:10.5px;
+}
+.gl b::before{
+  content:'';
+  width:8px;height:8px;
+  border-radius:2px;
+  background:#00e5ff;
+  box-shadow:0 0 10px #00e5ff;
+  animation:iconPulse 1.8s ease-in-out infinite;
+  transform:rotate(45deg);
+}
+@keyframes iconPulse{
+  0%,100%{transform:rotate(45deg) scale(1);opacity:1}
+  50%{transform:rotate(225deg) scale(1.2);opacity:.7}
+}
+.gl span{
+  color:#f8fafc;font-variant-numeric:tabular-nums;font-weight:900;
+  text-shadow:0 0 8px rgba(0,229,255,.5);
+  font-size:11px;
+}
+
+/* Bar neon */
+.bar{
+  height:11px;border-radius:6px;
+  background:#000;
+  overflow:hidden;position:relative;
+  box-shadow:
+    inset 0 1px 4px rgba(0,0,0,1),
+    inset 0 0 0 1px rgba(0,229,255,.08);
+}
+.bar i{
+  display:block;height:100%;border-radius:6px;
+  position:relative;width:0;
+  background:linear-gradient(90deg,#06b6d4,#00e5ff,#22d3ee);
+  background-size:200% 100%;
+  box-shadow:0 0 15px rgba(0,229,255,.8),0 0 30px rgba(0,229,255,.4),inset 0 0 8px rgba(255,255,255,.4);
+  transition:width 1.4s cubic-bezier(.45,.05,.3,1);
+  animation:barFlow 2.5s linear infinite;
+}
+@keyframes barFlow{
+  0%{background-position:0% 0}
+  100%{background-position:200% 0}
+}
+.bar i::before{
+  content:'';position:absolute;
+  top:0;left:-100%;
+  width:100%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent);
+  animation:barShimmer 2.5s infinite;
+}
+@keyframes barShimmer{100%{left:200%}}
+.bar i::after{
+  content:'';position:absolute;
+  top:0;left:0;right:0;height:50%;
+  border-radius:6px 6px 0 0;
+  background:linear-gradient(180deg,rgba(255,255,255,.35),transparent);
+}
+
+/* Bar RAM ungu */
+#rb i{
+  background:linear-gradient(90deg,#7c3aed,#a855f7,#c084fc);
+  background-size:200% 100%;
+  box-shadow:0 0 15px rgba(168,85,247,.8),0 0 30px rgba(168,85,247,.4),inset 0 0 8px rgba(255,255,255,.4);
+}
+
+/* Bar DISK hijau */
+#db i{
+  background:linear-gradient(90deg,#16a34a,#22c55e,#4ade80);
+  background-size:200% 100%;
+  box-shadow:0 0 15px rgba(34,197,94,.8),0 0 30px rgba(34,197,94,.4),inset 0 0 8px rgba(255,255,255,.4);
+}
+
+/* Bar TEMP orange */
+#tb i{
+  background:linear-gradient(90deg,#ea580c,#f97316,#fb923c);
+  background-size:200% 100%;
+  box-shadow:0 0 15px rgba(249,115,22,.8),0 0 30px rgba(249,115,22,.4),inset 0 0 8px rgba(255,255,255,.4);
+}
+
+/* Bar merah (danger) */
+.bar.r i{
+  background:linear-gradient(90deg,#dc2626,#f43f5e,#fb7185);
+  background-size:200% 100%;
+  box-shadow:0 0 20px rgba(244,63,94,1),0 0 40px rgba(244,63,94,.5),inset 0 0 10px rgba(255,255,255,.4);
+  animation:barFlow 1.5s linear infinite,dangerPulse .8s ease-in-out infinite;
+}
+@keyframes dangerPulse{
+  0%,100%{filter:brightness(1)}
+  50%{filter:brightness(1.4)}
+}
+
+/* ═══════════════════════════════════════
+   INFO GRID — BLACK CARDS
+   ═══════════════════════════════════════ */
+.grid{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:8px;margin:10px 0;
+}
+.cell{
+  border-radius:12px;padding:9px 11px;
+  background:linear-gradient(135deg,#08080f 0%,#020205 100%);
+  border:1px solid rgba(255,255,255,.07);
+  position:relative;overflow:hidden;
+  transition:all .3s ease;
+  box-shadow:0 3px 12px rgba(0,0,0,.6);
+  animation:cardFadeIn .7s ease backwards;
+}
+.cell:nth-child(1){animation-delay:.4s}
+.cell:nth-child(2){animation-delay:.45s}
+.cell:nth-child(3){animation-delay:.5s}
+.cell:nth-child(4){animation-delay:.55s}
+.cell:nth-child(5){animation-delay:.6s}
+.cell:nth-child(6){animation-delay:.65s}
+.cell:nth-child(7){animation-delay:.7s}
+.cell::before{
+  content:'';position:absolute;
+  top:0;left:-100%;
+  width:100%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(0,229,255,.08),transparent);
+  animation:cardShine 6s ease-in-out infinite;
+}
+.cell i{
+  display:block;font:800 7.5px Arial;
+  font-style:normal;letter-spacing:1.8px;
+  color:#475569;margin-bottom:4px;
+  position:relative;
+}
+.cell b{
+  font:800 10.5px 'Courier New',monospace;
+  color:#cbd5e1;word-break:break-word;
+  position:relative;
+  text-shadow:0 0 8px rgba(203,213,225,.15);
+}
+
+/* ═══════════════════════════════════════
+   FOOTER
+   ═══════════════════════════════════════ */
+.ft{
+  display:flex;justify-content:space-between;
+  font:700 8.5px 'Courier New',monospace;
+  color:#475569;padding:5px 6px;margin-top:6px;
+  letter-spacing:.5px;
+}
+.pulse{
+  animation:pl 2.4s ease-in-out infinite;
+  color:#00e5ff;
+  text-shadow:0 0 10px rgba(0,229,255,.5);
+}
+@keyframes pl{50%{opacity:.4}}
+
+.refresh-dot{
+  display:inline-block;
+  width:6px;height:6px;border-radius:50%;
+  background:#4ade80;
+  margin-right:5px;
+  animation:refreshPulse 2s infinite;
+  vertical-align:middle;
+  box-shadow:0 0 8px #4ade80;
+}
+@keyframes refreshPulse{
+  0%{opacity:1;box-shadow:0 0 0 0 rgba(74,222,128,.7),0 0 8px #4ade80}
+  50%{opacity:.5;box-shadow:0 0 0 8px rgba(74,222,128,0),0 0 12px #4ade80}
+  100%{opacity:1;box-shadow:0 0 0 0 rgba(74,222,128,0),0 0 8px #4ade80}
+}
+
+/* small phone */
+@media(max-width:380px){
+.hdr h1{font-size:15px}
+.net-card b{font-size:11px}
+.up b{font-size:19px}
+.cell b{font-size:9.5px}
+}
+</style>
+
+<div id="app">
+  <div class="hdr">
+    <img src="${BANNER}" onerror="this.style.display='none'">
+    <div>
+      <h1>SERVER LIVE</h1>
+      <div class="st"><i></i>MONITORING ACTIVE</div>
+    </div>
+  </div>
+
+  <div class="net-grid">
+    <div class="net-card"><small>PING</small><b>${d.ping > 0 ? d.ping + 'ms' : 'N/A'}</b></div>
+    <div class="net-card"><small>DOWNLOAD</small><b>${d.download}</b></div>
+    <div class="net-card"><small>UPLOAD</small><b>${d.upload}</b></div>
+  </div>
+
+  <div class="up">
+    <small>BOT UPTIME</small>
+    <b id="up">-</b>
+    <span id="sys">system: -</span>
+  </div>
+
+  <div class="gauge">
+    <div class="gl"><b>CPU LOAD</b><span id="cv">-</span></div>
+    <div class="bar" id="cb"><i style="width:0%"></i></div>
+  </div>
+
+  <div class="gauge">
+    <div class="gl"><b>RAM</b><span id="rv">-</span></div>
+    <div class="bar" id="rb"><i style="width:0%"></i></div>
+  </div>
+
+  <div class="gauge">
+    <div class="gl"><b>DISK</b><span id="dv">-</span></div>
+    <div class="bar" id="db"><i style="width:0%"></i></div>
+  </div>
+
+  <div class="gauge">
+    <div class="gl"><b>CPU TEMP</b><span id="tv">-</span></div>
+    <div class="bar" id="tb"><i style="width:0%"></i></div>
+  </div>
+
+  <div class="grid">
+    <div class="cell"><i>OS</i><b>${d.osType}</b></div>
+    <div class="cell"><i>ARCH</i><b>${d.arch}</b></div>
+    <div class="cell"><i>CPU</i><b>${d.cores} core</b></div>
+    <div class="cell"><i>HEAP / RSS</i><b>${d.heapUsed} / ${d.rss}</b></div>
+    <div class="cell"><i>SWAP</i><b>${d.swapTxt}</b></div>
+    <div class="cell"><i>IP PRIMARY</i><b>${d.net}</b></div>
+    <div class="cell" style="grid-column:1/-1"><i>RUNTIME</i><b>${d.runtime} · ${d.engine}</b></div>
+  </div>
+
+  <div class="ft">
+    <span id="age"><span class="refresh-dot"></span>Updated 0s ago</span>
+    <b class="pulse">${d.botName}</b>
+  </div>
+</div>
+
+<script>
+var D=${DATA};
+function $(i){return document.getElementById(i)}
+function fmt(s){
+  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60;
+  return (d?d+'d ':'')+(h||d?h+'h ':'')+(m||h||d?m+'m ':'')+x+'s'
+}
+function paint(cpu,ram,disk,temp){
+  $('cb').firstChild.style.width=Math.min(100,cpu)+'%';
+  $('cv').textContent=cpu.toFixed(1)+'%';
+  $('rb').firstChild.style.width=Math.min(100,ram)+'%';
+  $('rv').textContent=ram.toFixed(1)+'%';
+  $('db').firstChild.style.width=Math.min(100,disk)+'%';
+  $('dv').textContent=disk.toFixed(1)+'%';
+  $('tb').firstChild.style.width=Math.min(100,temp)+'%';
+  $('tv').textContent=temp>0?temp.toFixed(1)+'°C':'N/A';
+  $('cb').className='bar'+(cpu>85?' r':'');
+  $('rb').className='bar'+(ram>85?' r':'');
+  $('db').className='bar'+(disk>90?' r':'');
+  $('tb').className='bar'+(temp>70?' r':'');
+}
+function tick(){
+  var el=Math.floor((Date.now()-D.at)/1000);
+  $('up').textContent=fmt(D.botUpSec+el);
+  $('sys').textContent='system: '+fmt(D.sysUpSec+el);
+  $('age').innerHTML='<span class="refresh-dot"></span>Updated '+el+'s ago';
+}
+paint(D.cpu,D.ram,D.disk,D.temp);
+setInterval(tick,1000);
+tick();
+</script>
+</body></html>`
+}
+
+// ===== BUILD WHATSAPP RICH MESSAGE =====
+export function buildPingMessage(data) {
+  const html = buildPingHtml(data)
+
+  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
+  })
+
+  const payloadJson = {
+    response_id: uuid,
+    sections: [{
+      view_model: {
+        primitive: {
+          __typename: "GenAIaeacdsnwHtmlPrimitive",
+          payload: html,
+          trusted_sources: ["vinss.bot"]
+        },
+        __typename: "GenAISingleLayoutViewModel"
+      }
+    }]
+  }
+
+  const unifiedResponseData = Buffer
+    .from(JSON.stringify(payloadJson))
+    .toString('base64')
+
+  return {
+    botForwardedMessage: {
+      message: {
+        richResponseMessage: {
+          messageType: 1,
+          submessages: [{ messageType: 2, messageText: 'Server Live Monitor' }],
+          unifiedResponse: { data: unifiedResponseData },
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true,
+            forwardedAiBotMessageInfo: { botJid: "867051314767696@bot" },
+            forwardOrigin: 4
+          }
+        }
+      }
+    }
+  }
+}

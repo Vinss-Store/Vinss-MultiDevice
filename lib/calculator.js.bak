@@ -1,0 +1,406 @@
+/*═══════════════════════════════════════════════════════
+ *  CALCULATOR WEBVIEW - VINSS BOTZ
+ *═══════════════════════════════════════════════════════
+ */
+
+import { proto, generateWAMessageFromContent } from "@whiskeysockets/baileys";
+import crypto from "crypto";
+
+/**
+ * Calculator engine — hitung ekspresi dengan aman
+ */
+export function calculate(expression) {
+  try {
+    let expr = String(expression)
+      .toLowerCase()
+      .replace(/Г—/g, "*")
+      .replace(/x/g, "*")
+      .replace(/Г·/g, "/")
+      .replace(/вҲҡ/g, "sqrt")
+      .replace(/,/g, "")
+      .trim();
+
+    // ganti sqrt(x) manual ke Math.sqrt
+    expr = expr.replace(/sqrt\(([^)]+)\)/g, "Math.sqrt($1)");
+    expr = expr.replace(/\^/g, "**");
+
+    // validasi: hanya angka, operator, kurung, titik, spasi, & Math.sqrt
+    const cleaned = expr.replace(/Math\.sqrt/g, "");
+    if (!/^[0-9+\-*/%().\s]+$/.test(cleaned)) {
+      return { success: false, error: "Karakter tidak valid!" };
+    }
+
+    const result = Function(`"use strict"; return (${expr});`)();
+
+    if (result === Infinity || Number.isNaN(result)) {
+      return { success: false, error: "Hasil tidak terdefinisi!" };
+    }
+
+    let finalResult = result;
+    if (typeof finalResult === "number" && !Number.isInteger(finalResult)) {
+      finalResult = parseFloat(finalResult.toFixed(10));
+    }
+
+    return { success: true, result: finalResult, expression: expr };
+  } catch (err) {
+    return { success: false, error: err.message || "Format salah!" };
+  }
+}
+
+/**
+ * Bangun HTML calculator full UI (glassmorphism)
+ * Ini yang akan di-render di WebView WhatsApp
+ */
+export function buildCalculatorHTML(botName = "VINSS BOTZ") {
+  return `<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Calculator - ${botName}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    background: linear-gradient(160deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    color: #fff;
+  }
+  .calc {
+    background: rgba(255,255,255,0.05);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 28px;
+    padding: 20px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 4px;
+  }
+  .brand-title {
+    font-size: 11px;
+    letter-spacing: 4px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+  }
+  .brand-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 10px #22c55e;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .display {
+    background: rgba(0,0,0,0.45);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 20px;
+    padding: 18px 20px;
+    min-height: 120px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    text-align: right;
+    overflow: hidden;
+  }
+  .history {
+    color: rgba(255,255,255,0.4);
+    font-size: 13px;
+    min-height: 18px;
+    margin-bottom: 6px;
+    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .current {
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.15;
+    word-break: break-all;
+    background: linear-gradient(135deg, #fff, #a5b4fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    transition: font-size 0.2s;
+  }
+  .current.small { font-size: 26px; }
+  .buttons {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  .btn {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #fff;
+    font-size: 22px;
+    font-weight: 600;
+    padding: 20px 0;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: transform 0.08s ease, background 0.15s ease;
+    user-select: none;
+    -webkit-user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .btn:active { transform: scale(0.92); background: rgba(255,255,255,0.16); }
+  .btn.op {
+    background: rgba(99,102,241,0.22);
+    color: #a5b4fc;
+    border-color: rgba(99,102,241,0.3);
+  }
+  .btn.op:active { background: rgba(99,102,241,0.4); }
+  .btn.fn {
+    background: rgba(244,63,94,0.18);
+    color: #fb7185;
+    border-color: rgba(244,63,94,0.28);
+  }
+  .btn.fn:active { background: rgba(244,63,94,0.35); }
+  .btn.equal {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    grid-column: span 2;
+    box-shadow: 0 8px 24px rgba(102,126,234,0.4);
+  }
+  .btn.equal:active { transform: scale(0.94); }
+  .btn.zero { grid-column: span 1; }
+  .footer {
+    text-align: center;
+    font-size: 10px;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 1px;
+    padding-top: 4px;
+  }
+  @media (max-height: 640px) {
+    .btn { padding: 14px 0; font-size: 18px; }
+    .current { font-size: 32px; }
+    .display { min-height: 90px; padding: 12px 16px; }
+    .calc { padding: 14px; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+  <div class="calc">
+    <div class="brand">
+      <div class="brand-title">${botName} вҖў Calculator</div>
+      <div class="brand-dot"></div>
+    </div>
+
+    <div class="display">
+      <div class="history" id="history"></div>
+      <div class="current" id="display">0</div>
+    </div>
+
+    <div class="buttons">
+      <div class="btn fn" onclick="press('C')">AC</div>
+      <div class="btn fn" onclick="press('DEL')">вҢ«</div>
+      <div class="btn op" onclick="press('(')">(</div>
+      <div class="btn op" onclick="press(')')">)</div>
+
+      <div class="btn" onclick="press('7')">7</div>
+      <div class="btn" onclick="press('8')">8</div>
+      <div class="btn" onclick="press('9')">9</div>
+      <div class="btn op" onclick="press('Г·')">Г·</div>
+
+      <div class="btn" onclick="press('4')">4</div>
+      <div class="btn" onclick="press('5')">5</div>
+      <div class="btn" onclick="press('6')">6</div>
+      <div class="btn op" onclick="press('Г—')">Г—</div>
+
+      <div class="btn" onclick="press('1')">1</div>
+      <div class="btn" onclick="press('2')">2</div>
+      <div class="btn" onclick="press('3')">3</div>
+      <div class="btn op" onclick="press('-')">вҲ’</div>
+
+      <div class="btn" onclick="press('вҲҡ')">вҲҡ</div>
+      <div class="btn" onclick="press('0')">0</div>
+      <div class="btn" onclick="press('.')">.</div>
+      <div class="btn op" onclick="press('+')">+</div>
+
+      <div class="btn fn" onclick="press('%')">%</div>
+      <div class="btn equal" onclick="press('=')">=</div>
+    </div>
+
+    <div class="footer">Powered by ${botName}</div>
+  </div>
+
+  <script>
+    const displayEl = document.getElementById('display');
+    const historyEl = document.getElementById('history');
+    let expr = '';
+    let history = '';
+
+    function updateDisplay() {
+      let text = expr || '0';
+      displayEl.textContent = text;
+      if (text.length > 12) displayEl.classList.add('small');
+      else displayEl.classList.remove('small');
+    }
+
+    function press(val) {
+      if (val === 'C') {
+        expr = '';
+        history = '';
+        historyEl.textContent = '';
+        updateDisplay();
+        return;
+      }
+      if (val === 'DEL') {
+        expr = expr.slice(0, -1);
+        updateDisplay();
+        return;
+      }
+      if (val === '=') {
+        if (!expr) return;
+        try {
+          let safeExpr = expr
+            .replace(/Г—/g, '*')
+            .replace(/Г·/g, '/')
+            .replace(/вҲҡ/g, 'Math.sqrt')
+            .replace(/%/g, '/100');
+          let result = Function('"use strict"; return (' + safeExpr + ')')();
+          if (result === Infinity || Number.isNaN(result)) {
+            historyEl.textContent = expr + ' =';
+            displayEl.textContent = 'Error';
+            expr = '';
+            return;
+          }
+          if (typeof result === 'number' && !Number.isInteger(result)) {
+            result = parseFloat(result.toFixed(10));
+          }
+          history = expr + ' =';
+          historyEl.textContent = history;
+          expr = String(result);
+          updateDisplay();
+        } catch (e) {
+          historyEl.textContent = expr + ' =';
+          displayEl.textContent = 'Error';
+          expr = '';
+        }
+        return;
+      }
+      // kalau вҲҡ, langsung append "вҲҡ("
+      if (val === 'вҲҡ') { expr += 'вҲҡ('; updateDisplay(); return; }
+      // kalau habis "=" lalu tekan angka, reset history
+      if (historyEl.textContent.endsWith('=')) {
+        historyEl.textContent = '';
+      }
+      expr += val;
+      updateDisplay();
+    }
+
+    // keyboard support (untuk desktop testing)
+    document.addEventListener('keydown', (e) => {
+      const k = e.key;
+      if (/[0-9.+\-*/()%]/.test(k)) press(k === '*' ? 'Г—' : k === '/' ? 'Г·' : k);
+      else if (k === 'Enter' || k === '=') press('=');
+      else if (k === 'Backspace') press('DEL');
+      else if (k === 'Escape') press('C');
+    });
+
+    updateDisplay();
+  </script>
+</body>
+</html>`;
+}
+
+/**
+ * Bangun payload pesan WebView untuk WhatsApp
+ * User klik tombol вҶ’ WhatsApp buka full-screen webview render HTML di atas
+ */
+export function buildCalculatorWebViewMessage(botName = "VINSS BOTZ", htmlContent) {
+  // kalau htmlContent tidak dikirim, generate
+  const html = htmlContent || buildCalculatorHTML(botName);
+
+  // Encode HTML ke base64 data URL вҖ” cara paling stabil untuk webview WhatsApp
+  const base64 = Buffer.from(html, "utf-8").toString("base64");
+  const dataUrl = `data:text/html;base64,${base64}`;
+
+  const interactiveMessage = proto.Message.InteractiveMessage.create({
+    body: proto.Message.InteractiveMessage.Body.create({
+      text:
+`рҹ§® *CALCULATOR WEBVIEW*
+
+Klik tombol di bawah untuk membuka calculator full-screen langsung di WhatsApp вңЁ
+
+в”Җ Kalkulator modern (glassmorphism)
+в”Җ Support keyboard & tombol
+в”Җ Riwayat perhitungan
+в”Җ Tidak perlu keluar aplikasi`,
+    }),
+    footer: proto.Message.InteractiveMessage.Footer.create({
+      text: `Powered by ${botName}`,
+    }),
+    header: proto.Message.InteractiveMessage.Header.create({
+      title: "рҹ§® Calculator",
+      subtitle: "Tap to open",
+      hasMediaAttachment: false,
+    }),
+    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+      buttons: [
+        {
+          name: "webview",
+          buttonParamsJson: JSON.stringify({
+            url: dataUrl,
+            presentation: "full_screen", // atau "compact"
+            title: "Calculator",
+          }),
+        },
+        {
+          name: "webview",
+          buttonParamsJson: JSON.stringify({
+            url: "https://www.desmos.com/scientific",
+            presentation: "full_screen",
+            title: "Scientific Calc",
+          }),
+        },
+        {
+          name: "quick_reply",
+          buttonParamsJson: JSON.stringify({
+            display_text: "рҹ§® Mode Tombol (Chat)",
+            id: ".calc",
+          }),
+        },
+      ],
+    }),
+  });
+
+  const msg = generateWAMessageFromContent(
+    "",
+    {
+      viewOnceMessage: {
+        message: {
+          messageContextInfo: {
+            deviceListMetadata: {},
+            deviceListMetadataVersion: 2,
+          },
+          interactiveMessage,
+        },
+      },
+    },
+    {}
+  );
+
+  return msg;
+}
